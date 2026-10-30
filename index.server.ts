@@ -4,7 +4,8 @@ import type {
   PluginServerContext,
 } from "@getpaseo/plugin/server";
 import { clearAttention } from "./server/attention";
-import { findLimitNotice, resetFromClock, type TimelineItem } from "./server/notice";
+import { detectLimitStop, type TimelineItem, type TurnOutcome } from "./server/limit";
+import { findLimitNotice, resetFromClock } from "./server/notice";
 import { describeUsage, findExhaustion, resetFromUsage } from "./server/usage";
 
 // Fixed text. Nothing from the transcript or the provider error is ever sent.
@@ -56,6 +57,10 @@ export default function contribute(server: PluginServerContext) {
 
   function scheduleResume(agent: PluginHookAgent, paseo: PaseoApi, limitId: string, resetsAtMs: number) {
     const now = Date.now();
+    if (resetsAtMs - now > MAX_WAIT_MS) {
+      console.log(`[${agent.id}] ${limitId} resets more than ${MAX_WAIT_MS / (24 * 60 * MINUTE)} days away; not resuming`);
+      return;
+    }
     const limitKey = `${agent.id}:${limitId}:${resetsAtMs}`;
     if (resumedLimits.has(limitKey)) {
       console.log(`[${agent.id}] already resumed once for ${limitId}; not repeating`);
@@ -107,28 +112,46 @@ export default function contribute(server: PluginServerContext) {
 
   async function onTurnEnded(
     agent: PluginHookAgent,
-    failed: boolean,
+    outcome: TurnOutcome,
     timeline: readonly TimelineItem[],
     paseo: PaseoApi,
   ) {
     // Claude Code reports a usage limit as an ordinary final message, not as an error,
     // so the notice is the primary signal. It must be the last line of the final text.
     const notice = findLimitNotice(timeline);
-    if (notice) {
-      const providers = await readUsage(agent, paseo);
-      const now = Date.now();
-      const resetsAtMs =
-        resetFromUsage(providers, agent.provider, notice.kind, now, MAX_WAIT_MS) ??
-        resetFromClock(notice, now, DAEMON_TIME_ZONE);
-      if (resetsAtMs === null) {
-        console.log(`[${agent.id}] ${notice.kind} limit notice, but no usable reset time; not resuming`);
-        return;
-      }
-      scheduleResume(agent, paseo, `${notice.kind} limit`, resetsAtMs);
+    const now = Date.now();
+    // Other providers word their limits differently; some end the turn as an ordinary
+    // reply, some fail it. detectLimitStop covers both, whatever the provider.
+    const stop = notice ? null : detectLimitStop(outcome, timeline, now, DAEMON_TIME_ZONE);
+    if (!notice && !stop) {
+      // A failed turn with no recognized notice can still be a limit: confirm with usage data.
+      if (outcome.kind === "failed") await checkUsageAfterFailure(agent, paseo, false);
       return;
     }
-    // Other providers may fail the turn instead; confirm with usage data.
-    if (failed) await checkUsageAfterFailure(agent, paseo, false);
+
+    const providers = await readUsage(agent, paseo);
+    const resetsAtMs = notice
+      ? // Structured data beats the notice's clock time.
+        (resetFromUsage(providers, agent.provider, notice.kind, now, MAX_WAIT_MS) ??
+          resetFromClock(notice, now, DAEMON_TIME_ZONE))
+      : // A stated reset time is the provider's own; usage data may still reveal a later
+        // limit that must clear first, so the later of the two wins.
+        (() => {
+          const exhaustion = findExhaustion(providers, agent.provider, now, MAX_WAIT_MS);
+          const stated = stop!.resetsAtMs;
+          if (exhaustion && stated !== null) return Math.max(exhaustion.resetsAtMs, stated);
+          return exhaustion?.resetsAtMs ?? stated;
+        })();
+    const limitId = notice ? `${notice.kind} limit` : `${agent.provider} ${stop!.source}`;
+
+    if (resetsAtMs === null) {
+      console.log(`[${agent.id}] limit stop, but no usable reset time yet; will re-check usage once`);
+      schedule(agent.id, STALE_USAGE_RECHECK_MS, "usage re-check", () =>
+        checkUsageAfterFailure(agent, paseo, true),
+      );
+      return;
+    }
+    scheduleResume(agent, paseo, limitId, resetsAtMs);
   }
 
   // Any new turn, whether from the user or elsewhere, means the agent is no longer waiting.
@@ -142,7 +165,7 @@ export default function contribute(server: PluginServerContext) {
       const page = await paseo.agents.ref(agent.id).timeline.refetch({ direction: "tail", limit: 20 });
       const timeline = page.entries.map((entry) => entry.item);
       console.log(`[${agent.id}] turn ${outcome.kind} (${agent.provider}, ${timeline.length} timeline items)`);
-      await onTurnEnded(agent, outcome.kind === "failed", timeline, paseo);
+      await onTurnEnded(agent, outcome, timeline, paseo);
     } catch (error) {
       console.error(`[${agent.id}] limit check failed:`, error);
     }

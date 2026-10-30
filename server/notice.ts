@@ -26,10 +26,12 @@ const NOTICE =
 export function findLimitNotice(timeline: readonly TimelineItem[]): LimitNotice | null {
   let start = timeline.length;
   while (start > 0 && timeline[start - 1]?.type === "assistant_message") start--;
+  // Item boundaries are line breaks: a separate notice item stays its own line even
+  // when the previous reply does not end with a newline.
   const finalText = timeline
     .slice(start)
     .map((item) => item.text ?? "")
-    .join("");
+    .join("\n");
   const lastLine = finalText.trim().split("\n").pop()?.trim() ?? "";
 
   const match = NOTICE.exec(lastLine);

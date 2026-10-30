@@ -12,9 +12,22 @@ When an agent's turn ends, the plugin checks why it stopped:
   that notice is the last line of the agent's final message and matches exactly. The reset time
   comes from Paseo's usage data for the matching window. Without it, the plugin converts the
   notice's clock time from the time zone the notice names, so it works on daemons in any zone.
-- **Codex** and other providers with usage data fail the turn instead. The plugin then reads
-  Paseo's usage data and acts only if a usage window for that provider is at 100%. Because Paseo
-  caches usage for five minutes, it checks once more after the cache expires.
+- **Other providers** word their limits differently, and some end the turn as an ordinary reply
+  instead of failing it. The plugin therefore also reads the turn's failure text, the turn's
+  error and notification items, and its closing reply, looking for the limit phrasings providers
+  use (`You've hit your usage limit`, `usage limit reached`, `quota exceeded`,
+  `RESOURCE_EXHAUSTED`, `Too many requests`, ...). A notice that states its own reset time —
+  `resets in 2 hours 13 minutes`, `try again at Oct 20th, 2026 9:48 PM`, `resets 3pm (Asia/Seoul)`,
+  an ISO timestamp, or Claude's legacy epoch suffix — is resumed at that time even when Paseo has
+  no usage source for the provider. A notice without a stated reset is confirmed against Paseo's
+  usage data: the plugin acts only if a usage window for that provider is at 100%, and re-checks
+  once after Paseo's five-minute usage cache expires.
+- Providers that fail the turn without any recognized notice are still checked against Paseo's
+  usage data alone, and resumed when a window is at 100%.
+
+Billing and context stops are never resumed: a prepaid balance or workspace credits that ran out
+does not renew on a clock, and their phrases (`insufficient_quota`, `credit balance`,
+`out of credits`, context-length errors) exclude a text from being a limit notice.
 
 Two minutes after the reset, it sends the agent a fixed prompt:
 
@@ -34,6 +47,8 @@ request the app sends when an agent is opened, over its existing daemon connecti
 - A pending resume is cancelled when a new turn starts or the agent is archived.
 - Just before sending, the agent must be idle, with no active turn or pending permission request.
 - Without a usable reset time, or with a reset more than eight days away, it does nothing.
+- Notices are short texts that open with the limit statement, so an answer that merely discusses
+  or quotes a limit does not trigger a resume.
 - No runtime dependencies, network calls, or shell commands of its own.
 
 ## Limitations
@@ -41,9 +56,15 @@ request the app sends when an agent is opened, over its existing daemon connecti
 - Pending resumes live in memory; a plugin reload or daemon restart drops them.
 - Marking the agent as read relies on Paseo's internal plugin connection format, which a
   Paseo update could change. If it breaks, the resume still happens but may not notify.
-- Providers without usage data in Paseo (for example DeepSeek) are never resumed.
 - Credit balances are ignored, since a zero prepaid balance is normal.
-- A weekly notice that names a date rather than a time is not matched.
+- A weekly notice that names a date rather than a time is not matched by the strict Claude
+  notice; the generic detector's dated phrases still cover such resets for other providers.
+- The generic limit phrasings are a heuristic distilled from real provider notices (see the
+  comment in `server/limit.ts` for their sources). A provider that words a limit unusually
+  still needs Paseo usage data to be resumed, and a provider Paseo reports no usage for is
+  resumed only when its own notice states the reset time.
+- Matching an agent to its usage entry is by provider ID only; an agent signed in with a
+  different account than the one Paseo's usage source reports is not distinguished.
 
 ## Install
 

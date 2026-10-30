@@ -18,6 +18,13 @@ test("finds the notice as the last line after other text", () => {
   assert.equal(findLimitNotice(timeline)?.kind, "session");
 });
 
+// Regression for issue #1: items do not end with a newline, so a separate notice item
+// glued onto the previous reply used to hide the notice.
+test("treats an item boundary as a line break when the previous reply has no newline", () => {
+  const timeline = [tool, assistant("Phase 8 is committed. I'm waiting for the review."), assistant(NOTICE)];
+  assert.equal(findLimitNotice(timeline)?.kind, "session");
+});
+
 test("ignores the notice when work followed it", () => {
   assert.equal(findLimitNotice([assistant(NOTICE), tool]), null);
 });
