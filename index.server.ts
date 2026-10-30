@@ -135,10 +135,13 @@ export default function contribute(server: PluginServerContext) {
   server.on("agent.turn_started", ({ agent }) => cancel(agent.id, "a new turn started"));
   server.on("agent.archived", ({ agent }) => cancel(agent.id, "agent archived"));
 
-  server.on("agent.turn_ended", async ({ agent, outcome, timeline }, { paseo }) => {
+  server.on("agent.turn_ended", async ({ agent, outcome }, { paseo }) => {
     if (outcome.kind === "canceled") return;
-    console.log(`[${agent.id}] turn ${outcome.kind} (${agent.provider})`);
     try {
+      // Since Paseo 0.14 the hook's own timeline is always empty; fetch the tail instead.
+      const page = await paseo.agents.ref(agent.id).timeline.refetch({ direction: "tail", limit: 20 });
+      const timeline = page.entries.map((entry) => entry.item);
+      console.log(`[${agent.id}] turn ${outcome.kind} (${agent.provider}, ${timeline.length} timeline items)`);
       await onTurnEnded(agent, outcome.kind === "failed", timeline, paseo);
     } catch (error) {
       console.error(`[${agent.id}] limit check failed:`, error);
